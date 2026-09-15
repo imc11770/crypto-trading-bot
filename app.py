@@ -1,40 +1,27 @@
-from flask import Flask, render_template, jsonify, request
-from flask_cors import CORS
+from flask import Flask, render_template, jsonify
 import os
 from dotenv import load_dotenv
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-import json
+import random
+from datetime import datetime
+from collections import defaultdict
 import threading
 import time
-import random
-import requests
-from collections import defaultdict
 
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
 
-# Configuration
 CONFIG = {
-    'initial_capital': float(os.getenv('INITIAL_CAPITAL', 1000)),
-    'risk_per_trade': float(os.getenv('RISK_PER_TRADE', 0.02)),
-    'risk_reward_ratio': float(os.getenv('RISK_REWARD_RATIO', 3)),
-    'max_daily_loss': float(os.getenv('MAX_DAILY_LOSS', 0.05)),
-    'tp_percent': 3,  # Take Profit 3%
-    'sl_percent': 1,  # Stop Loss 1%
-    'max_open_positions': 5,  # Maximum 5 positions at a time
+    'initial_capital': 1000,
+    'tp_percent': 3,
+    'sl_percent': 1,
+    'max_positions': 5,
+    'risk_per_trade': 0.02,
 }
 
-# Real price cache
-price_cache = {}
-
-# Trading State
 trading_state = {
-    'balance': CONFIG['initial_capital'],
-    'initial_balance': CONFIG['initial_capital'],
+    'balance': 1000,
+    'initial_balance': 1000,
     'is_trading': False,
     'total_trades': 0,
     'winning_trades': 0,
@@ -42,287 +29,74 @@ trading_state = {
     'total_profit': 0,
     'open_positions': [],
     'closed_trades': [],
-    'daily_loss': 0,
-    'last_update': datetime.now().isoformat(),
-    'trades_today': 0,
     'win_rate': 0,
-    'balance_history': [CONFIG['initial_capital']],
+    'balance_history': [1000],
     'daily_profit': defaultdict(float),
+    'last_update': datetime.now().isoformat(),
 }
 
-# Get real prices from CoinGecko (free API)
-def get_real_price(symbol):
-    """Get real price from CoinGecko API"""
+def simulate_trade():
+    """Simulate a trade"""
     try:
-        symbol_map = {
-            'BTCUSDT': 'bitcoin',
-            'ETHUSDT': 'ethereum',
-            'BNBUSDT': 'binancecoin',
-            'ADAUSDT': 'cardano',
-            'DOGEUSDT': 'dogecoin',
-        }
+        if not trading_state['is_trading']:
+            return
         
-        coin = symbol_map.get(symbol, 'bitcoin')
+        if len(trading_state['open_positions']) >= CONFIG['max_positions']:
+            return
         
-        if symbol in price_cache:
-            # Return cached price with slight random variation
-            cached = price_cache[symbol]
-            variation = random.uniform(-0.001, 0.001)  # ±0.1% variation
-            return cached * (1 + variation)
+        balance = trading_state['balance']
+        risk_amount = balance * CONFIG['risk_per_trade']
         
-        url = f'https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd'
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        price = float(data[coin]['usd'])
+        # 65% win rate
+        is_win = random.random() < 0.65
         
-        # Cache the price
-        price_cache[symbol] = price
-        
-        return price
-    except Exception as e:
-        print(f"Error getting price for {symbol}: {e}")
-        return price_cache.get(symbol, 45000 if symbol == 'BTCUSDT' else 2500)
-
-def calculate_moving_averages(prices):
-    """Calculate 20, 50, 200 moving averages"""
-    if len(prices) < 200:
-        return None, None, None
-    
-    ma20 = np.mean(prices[-20:])
-    ma50 = np.mean(prices[-50:])
-    ma200 = np.mean(prices[-200:])
-    
-    return ma20, ma50, ma200
-
-def calculate_rsi(prices, period=14):
-    """Calculate Relative Strength Index"""
-    if len(prices) < period:
-        return 50
-    
-    deltas = np.diff(prices[-period-1:])
-    seed = deltas[:period]
-    up = seed[seed >= 0].sum() / period
-    down = -seed[seed < 0].sum() / period
-    
-    rs = up / down if down != 0 else 0
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-def calculate_bollinger_bands(prices, period=20):
-    """Calculate Bollinger Bands"""
-    if len(prices) < period:
-        return None, None, None
-    
-    ma = np.mean(prices[-period:])
-    std = np.std(prices[-period:])
-    
-    upper = ma + (std * 2)
-    lower = ma - (std * 2)
-    
-    return upper, ma, lower
-
-def simulate_price_history(current_price):
-    """Generate simulated price history for technical analysis"""
-    prices = []
-    price = current_price * 0.98
-    
-    for i in range(300):
-        change = random.uniform(-0.01, 0.01)
-        price = price * (1 + change)
-        prices.append(price)
-    
-    return np.array(prices)
-
-def analyze_symbol(symbol='BTCUSDT'):
-    """Full technical analysis of a symbol with REAL prices"""
-    try:
-        current_price = get_real_price(symbol)
-        prices = simulate_price_history(current_price)
-        
-        ma20, ma50, ma200 = calculate_moving_averages(prices)
-        rsi = calculate_rsi(prices)
-        upper, mid, lower = calculate_bollinger_bands(prices)
-        
-        price_change = ((prices[-1] - prices[-2]) / prices[-2] * 100) if prices[-2] != 0 else 0
-        
-        signal = 'NEUTRAL'
-        strength = 0
-        
-        if ma20 and ma50:
-            if ma20 > ma50 and rsi > 45 and current_price > mid:
-                signal = 'BUY'
-                strength = min(100, (rsi - 40) + 30)
-            elif ma20 < ma50 and rsi < 55 and current_price < mid:
-                signal = 'SELL'
-                strength = min(100, (60 - rsi) + 30)
-            elif rsi > 75:
-                signal = 'SELL'
-                strength = 75
-            elif rsi < 25:
-                signal = 'BUY'
-                strength = 75
-        
-        return {
-            'symbol': symbol,
-            'current_price': round(current_price, 2),
-            'price_change': round(price_change, 2),
-            'ma20': float(ma20) if ma20 else None,
-            'ma50': float(ma50) if ma50 else None,
-            'ma200': float(ma200) if ma200 else None,
-            'rsi': round(rsi, 1),
-            'upper_band': float(upper) if upper else None,
-            'middle_band': float(mid) if mid else None,
-            'lower_band': float(lower) if lower else None,
-            'signal': signal,
-            'strength': int(min(strength, 100)),
-            'timestamp': datetime.now().isoformat(),
-        }
-    except Exception as e:
-        print(f"Error analyzing {symbol}: {e}")
-        return None
-
-def execute_trade(symbol, signal, entry_price, strength):
-    """Execute trade with TP/SL logic and max 5 open positions"""
-    try:
-        if strength < 50:
-            return False
-        
-        # Check if we already have 5 open positions
-        if len(trading_state['open_positions']) >= CONFIG['max_open_positions']:
-            return False
-        
-        # Calculate position size based on risk
-        account_balance = trading_state['balance']
-        risk_amount = account_balance * CONFIG['risk_per_trade']
-        
-        # Calculate TP and SL levels
-        if signal == 'BUY':
-            tp_price = entry_price * (1 + CONFIG['tp_percent'] / 100)  # 3% TP
-            sl_price = entry_price * (1 - CONFIG['sl_percent'] / 100)  # 1% SL
-        else:  # SELL
-            tp_price = entry_price * (1 - CONFIG['tp_percent'] / 100)  # 3% TP
-            sl_price = entry_price * (1 + CONFIG['sl_percent'] / 100)  # 1% SL
-        
-        # Create open position
-        position = {
-            'id': len(trading_state['open_positions']) + 1,
-            'symbol': symbol,
-            'type': 'BUY' if signal == 'BUY' else 'SELL',
-            'entry_price': round(entry_price, 2),
-            'tp_price': round(tp_price, 2),
-            'sl_price': round(sl_price, 2),
-            'entry_time': datetime.now().isoformat(),
-            'risk_amount': round(risk_amount, 2),
-        }
-        
-        # Add to open positions
-        trading_state['open_positions'].append(position)
-        
-        # Simulate trade outcome (65% win rate)
-        is_tp_hit = random.random() < 0.65
-        
-        if is_tp_hit:
-            # TP Hit - Calculate profit with 3% gain
-            profit = risk_amount * CONFIG['risk_reward_ratio']  # 3x risk = 3% profit
+        if is_win:
+            profit = risk_amount * 3  # 3% profit
             trading_state['winning_trades'] += 1
             status = '✅ WIN'
         else:
-            # SL Hit - Fixed 1% loss
-            profit = -risk_amount  # -1% loss
+            profit = -risk_amount  # 1% loss
             trading_state['losing_trades'] += 1
             status = '❌ LOSS'
         
-        # Create closed trade record
         trade = {
-            'id': len(trading_state['closed_trades']) + 1,
-            'symbol': symbol,
-            'type': 'BUY' if signal == 'BUY' else 'SELL',
-            'entry_price': round(entry_price, 2),
-            'tp_price': round(tp_price, 2),
-            'sl_price': round(sl_price, 2),
-            'exit_price': round(tp_price if is_tp_hit else sl_price, 2),
+            'id': trading_state['total_trades'] + 1,
+            'symbol': random.choice(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']),
+            'type': random.choice(['BUY', 'SELL']),
+            'entry_price': round(random.uniform(100, 50000), 2),
+            'tp_price': round(random.uniform(100, 50000), 2),
+            'sl_price': round(random.uniform(100, 50000), 2),
+            'exit_price': round(random.uniform(100, 50000), 2),
             'profit': round(profit, 2),
             'time': datetime.now().isoformat(),
             'status': status,
-            'exit_reason': 'TP Hit (+3%)' if is_tp_hit else 'SL Hit (-1%)'
+            'exit_reason': 'TP Hit (+3%)' if is_win else 'SL Hit (-1%)'
         }
         
-        # Update state with COMPOUND LOGIC
         trading_state['closed_trades'].append(trade)
         trading_state['total_profit'] += profit
-        trading_state['balance'] += profit  # Compound - reinvest profits
-        trading_state['balance_history'].append(trading_state['balance'])
+        trading_state['balance'] += profit
+        trading_state['balance_history'].append(round(trading_state['balance'], 2))
         trading_state['total_trades'] += 1
         
-        # Remove closed position from open positions
-        if trading_state['open_positions']:
-            trading_state['open_positions'].pop(0)
+        if trading_state['total_trades'] > 0:
+            trading_state['win_rate'] = round((trading_state['winning_trades'] / trading_state['total_trades'] * 100), 1)
         
-        # Track daily profit
-        today = datetime.now().strftime('%Y-%m-%d')
-        trading_state['daily_profit'][today] += profit
-        
-        return True
+        trading_state['last_update'] = datetime.now().isoformat()
         
     except Exception as e:
-        print(f"Trade execution error: {e}")
-        return False
+        print(f"Trade error: {e}")
 
 def auto_trading_loop():
-    """Background trading loop - analyzes EVERY SECOND, max 5 positions"""
-    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']
-    last_trade_time = {}
-    
-    for symbol in symbols:
-        last_trade_time[symbol] = time.time()
-    
+    """Auto trading background loop"""
     while True:
         try:
-            if trading_state['is_trading']:
-                current_time = time.time()
-                
-                # Check daily loss limit
-                today = datetime.now().strftime('%Y-%m-%d')
-                if trading_state['daily_profit'][today] < -(CONFIG['initial_capital'] * CONFIG['max_daily_loss']):
-                    trading_state['is_trading'] = False
-                    print("⛔ Daily loss limit reached. Trading stopped.")
-                    continue
-                
-                # Analyze each symbol EVERY 1-2 SECONDS
-                for symbol in symbols:
-                    if current_time - last_trade_time[symbol] >= random.uniform(1, 2):
-                        # Only trade if less than 5 open positions
-                        if len(trading_state['open_positions']) < CONFIG['max_open_positions']:
-                            analysis = analyze_symbol(symbol)
-                            
-                            if analysis and analysis['signal'] != 'NEUTRAL':
-                                execute_trade(
-                                    symbol,
-                                    analysis['signal'],
-                                    analysis['current_price'],
-                                    analysis['strength']
-                                )
-                                
-                                last_trade_time[symbol] = current_time
-                
-                # Update win rate
-                if trading_state['total_trades'] > 0:
-                    trading_state['win_rate'] = round(
-                        (trading_state['winning_trades'] / trading_state['total_trades'] * 100), 1
-                    )
-                
-                # Update timestamp
-                trading_state['last_update'] = datetime.now().isoformat()
-                trading_state['trades_today'] = trading_state['total_trades']
-            
-            time.sleep(1)
-            
-        except Exception as e:
-            print(f"Auto trading loop error: {e}")
-            time.sleep(1)
+            simulate_trade()
+            time.sleep(2)
+        except:
+            time.sleep(2)
 
-# Start background trading thread
+# Start trading thread
 trading_thread = threading.Thread(target=auto_trading_loop, daemon=True)
 trading_thread.start()
 
@@ -331,30 +105,18 @@ def index():
     return render_template('index.html')
 
 @app.route('/api/trading/start', methods=['POST'])
-def start_trading():
+def start():
     trading_state['is_trading'] = True
-    return jsonify({
-        'status': '✅ Trading Started! Bot analyzing every second with MAX 5 positions...',
-        'is_trading': True,
-        'timestamp': datetime.now().isoformat()
-    })
+    return jsonify({'status': '✅ Trading Started', 'is_trading': True})
 
 @app.route('/api/trading/stop', methods=['POST'])
-def stop_trading():
+def stop():
     trading_state['is_trading'] = False
-    return jsonify({
-        'status': '⏹️ Trading Stopped',
-        'is_trading': False,
-        'timestamp': datetime.now().isoformat()
-    })
+    return jsonify({'status': '⏹️ Trading Stopped', 'is_trading': False})
 
 @app.route('/api/stats', methods=['GET'])
-def get_stats():
-    profit_percent = ((trading_state['balance'] - trading_state['initial_balance']) / trading_state['initial_balance'] * 100) if trading_state['initial_balance'] > 0 else 0
-    
-    today = datetime.now().strftime('%Y-%m-%d')
-    daily_loss = trading_state['daily_profit'][today]
-    
+def stats():
+    profit_pct = ((trading_state['balance'] - trading_state['initial_balance']) / trading_state['initial_balance'] * 100) if trading_state['initial_balance'] > 0 else 0
     return jsonify({
         'balance': round(trading_state['balance'], 2),
         'initial_balance': trading_state['initial_balance'],
@@ -363,47 +125,27 @@ def get_stats():
         'losing_trades': trading_state['losing_trades'],
         'win_rate': trading_state['win_rate'],
         'total_profit': round(trading_state['total_profit'], 2),
-        'profit_percent': round(profit_percent, 2),
-        'daily_profit': round(daily_loss, 2),
-        'is_trading': trading_state['is_trading'],
+        'profit_percent': round(profit_pct, 2),
         'open_positions': len(trading_state['open_positions']),
-        'max_positions': CONFIG['max_open_positions'],
+        'max_positions': CONFIG['max_positions'],
+        'is_trading': trading_state['is_trading'],
         'last_update': trading_state['last_update'],
         'balance_history': trading_state['balance_history'][-100:],
     })
 
 @app.route('/api/positions', methods=['GET'])
-def get_positions():
+def positions():
     return jsonify({
         'open_positions': trading_state['open_positions'],
         'closed_trades': trading_state['closed_trades'][-50:],
     })
 
-@app.route('/api/analyze/<symbol>', methods=['GET'])
-def analyze(symbol):
-    result = analyze_symbol(symbol)
-    return jsonify(result or {'error': 'Failed to analyze', 'symbol': symbol})
-
-@app.route('/api/analyze-all', methods=['GET'])
-def analyze_all():
-    """Analyze all symbols at once"""
-    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']
-    results = {}
-    
-    for symbol in symbols:
-        analysis = analyze_symbol(symbol)
-        if analysis:
-            results[symbol] = analysis
-    
-    return jsonify(results)
-
 @app.route('/api/reset', methods=['POST'])
-def reset_trading():
-    """Reset all trading data"""
+def reset():
     global trading_state
     trading_state = {
-        'balance': CONFIG['initial_capital'],
-        'initial_balance': CONFIG['initial_capital'],
+        'balance': 1000,
+        'initial_balance': 1000,
         'is_trading': False,
         'total_trades': 0,
         'winning_trades': 0,
@@ -411,18 +153,12 @@ def reset_trading():
         'total_profit': 0,
         'open_positions': [],
         'closed_trades': [],
-        'daily_loss': 0,
-        'last_update': datetime.now().isoformat(),
-        'trades_today': 0,
         'win_rate': 0,
-        'balance_history': [CONFIG['initial_capital']],
+        'balance_history': [1000],
         'daily_profit': defaultdict(float),
+        'last_update': datetime.now().isoformat(),
     }
-    
-    return jsonify({
-        'status': '🔄 Trading data reset successfully',
-        'balance': trading_state['balance']
-    })
+    return jsonify({'status': '🔄 Reset successful'})
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
