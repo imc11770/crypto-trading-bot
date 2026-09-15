@@ -23,8 +23,9 @@ CONFIG = {
     'risk_per_trade': float(os.getenv('RISK_PER_TRADE', 0.02)),
     'risk_reward_ratio': float(os.getenv('RISK_REWARD_RATIO', 3)),
     'max_daily_loss': float(os.getenv('MAX_DAILY_LOSS', 0.05)),
-    'tp_percent': float(os.getenv('TP_PERCENT', 2)),  # Take Profit %
-    'sl_percent': float(os.getenv('SL_PERCENT', 1)),  # Stop Loss %
+    'tp_percent': 3,  # Take Profit 3%
+    'sl_percent': 1,  # Stop Loss 1%
+    'max_open_positions': 5,  # Maximum 5 positions at a time
 }
 
 # Real price cache
@@ -182,9 +183,13 @@ def analyze_symbol(symbol='BTCUSDT'):
         return None
 
 def execute_trade(symbol, signal, entry_price, strength):
-    """Execute trade with TP/SL logic"""
+    """Execute trade with TP/SL logic and max 5 open positions"""
     try:
         if strength < 50:
+            return False
+        
+        # Check if we already have 5 open positions
+        if len(trading_state['open_positions']) >= CONFIG['max_open_positions']:
             return False
         
         # Calculate position size based on risk
@@ -193,31 +198,42 @@ def execute_trade(symbol, signal, entry_price, strength):
         
         # Calculate TP and SL levels
         if signal == 'BUY':
-            tp_price = entry_price * (1 + CONFIG['tp_percent'] / 100)
-            sl_price = entry_price * (1 - CONFIG['sl_percent'] / 100)
+            tp_price = entry_price * (1 + CONFIG['tp_percent'] / 100)  # 3% TP
+            sl_price = entry_price * (1 - CONFIG['sl_percent'] / 100)  # 1% SL
         else:  # SELL
-            tp_price = entry_price * (1 - CONFIG['tp_percent'] / 100)
-            sl_price = entry_price * (1 + CONFIG['sl_percent'] / 100)
+            tp_price = entry_price * (1 - CONFIG['tp_percent'] / 100)  # 3% TP
+            sl_price = entry_price * (1 + CONFIG['sl_percent'] / 100)  # 1% SL
+        
+        # Create open position
+        position = {
+            'id': len(trading_state['open_positions']) + 1,
+            'symbol': symbol,
+            'type': 'BUY' if signal == 'BUY' else 'SELL',
+            'entry_price': round(entry_price, 2),
+            'tp_price': round(tp_price, 2),
+            'sl_price': round(sl_price, 2),
+            'entry_time': datetime.now().isoformat(),
+            'risk_amount': round(risk_amount, 2),
+        }
+        
+        # Add to open positions
+        trading_state['open_positions'].append(position)
         
         # Simulate trade outcome (65% win rate)
         is_tp_hit = random.random() < 0.65
         
         if is_tp_hit:
-            # TP Hit - Calculate profit
-            if signal == 'BUY':
-                profit = risk_amount * CONFIG['risk_reward_ratio']
-            else:
-                profit = risk_amount * CONFIG['risk_reward_ratio']
-            
+            # TP Hit - Calculate profit with 3% gain
+            profit = risk_amount * CONFIG['risk_reward_ratio']  # 3x risk = 3% profit
             trading_state['winning_trades'] += 1
             status = '✅ WIN'
         else:
-            # SL Hit - Fixed loss
-            profit = -risk_amount
+            # SL Hit - Fixed 1% loss
+            profit = -risk_amount  # -1% loss
             trading_state['losing_trades'] += 1
             status = '❌ LOSS'
         
-        # Create trade record
+        # Create closed trade record
         trade = {
             'id': len(trading_state['closed_trades']) + 1,
             'symbol': symbol,
@@ -229,7 +245,7 @@ def execute_trade(symbol, signal, entry_price, strength):
             'profit': round(profit, 2),
             'time': datetime.now().isoformat(),
             'status': status,
-            'exit_reason': 'TP Hit' if is_tp_hit else 'SL Hit'
+            'exit_reason': 'TP Hit (+3%)' if is_tp_hit else 'SL Hit (-1%)'
         }
         
         # Update state with COMPOUND LOGIC
@@ -238,6 +254,10 @@ def execute_trade(symbol, signal, entry_price, strength):
         trading_state['balance'] += profit  # Compound - reinvest profits
         trading_state['balance_history'].append(trading_state['balance'])
         trading_state['total_trades'] += 1
+        
+        # Remove closed position from open positions
+        if trading_state['open_positions']:
+            trading_state['open_positions'].pop(0)
         
         # Track daily profit
         today = datetime.now().strftime('%Y-%m-%d')
@@ -250,7 +270,7 @@ def execute_trade(symbol, signal, entry_price, strength):
         return False
 
 def auto_trading_loop():
-    """Background trading loop - runs every 1 second"""
+    """Background trading loop - analyzes EVERY SECOND, max 5 positions"""
     symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']
     last_trade_time = {}
     
@@ -269,21 +289,22 @@ def auto_trading_loop():
                     print("⛔ Daily loss limit reached. Trading stopped.")
                     continue
                 
-                # Analyze each symbol
+                # Analyze each symbol EVERY 1-2 SECONDS
                 for symbol in symbols:
-                    # Trade every 20-30 seconds per symbol
-                    if current_time - last_trade_time[symbol] >= random.uniform(20, 30):
-                        analysis = analyze_symbol(symbol)
-                        
-                        if analysis and analysis['signal'] != 'NEUTRAL':
-                            execute_trade(
-                                symbol,
-                                analysis['signal'],
-                                analysis['current_price'],
-                                analysis['strength']
-                            )
+                    if current_time - last_trade_time[symbol] >= random.uniform(1, 2):
+                        # Only trade if less than 5 open positions
+                        if len(trading_state['open_positions']) < CONFIG['max_open_positions']:
+                            analysis = analyze_symbol(symbol)
                             
-                            last_trade_time[symbol] = current_time
+                            if analysis and analysis['signal'] != 'NEUTRAL':
+                                execute_trade(
+                                    symbol,
+                                    analysis['signal'],
+                                    analysis['current_price'],
+                                    analysis['strength']
+                                )
+                                
+                                last_trade_time[symbol] = current_time
                 
                 # Update win rate
                 if trading_state['total_trades'] > 0:
@@ -313,7 +334,7 @@ def index():
 def start_trading():
     trading_state['is_trading'] = True
     return jsonify({
-        'status': '✅ Trading Started! Bot is analyzing markets...',
+        'status': '✅ Trading Started! Bot analyzing every second with MAX 5 positions...',
         'is_trading': True,
         'timestamp': datetime.now().isoformat()
     })
@@ -346,6 +367,7 @@ def get_stats():
         'daily_profit': round(daily_loss, 2),
         'is_trading': trading_state['is_trading'],
         'open_positions': len(trading_state['open_positions']),
+        'max_positions': CONFIG['max_open_positions'],
         'last_update': trading_state['last_update'],
         'balance_history': trading_state['balance_history'][-100:],
     })
@@ -353,7 +375,7 @@ def get_stats():
 @app.route('/api/positions', methods=['GET'])
 def get_positions():
     return jsonify({
-        'open_positions': trading_state['open_positions'][-10:],
+        'open_positions': trading_state['open_positions'],
         'closed_trades': trading_state['closed_trades'][-50:],
     })
 
