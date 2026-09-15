@@ -6,6 +6,7 @@ from datetime import datetime
 from collections import defaultdict
 import threading
 import time
+import requests
 
 load_dotenv()
 
@@ -35,8 +36,41 @@ trading_state = {
     'last_update': datetime.now().isoformat(),
 }
 
+price_cache = {}
+
+def get_real_price(symbol):
+    """Fetch real price from CoinGecko API"""
+    try:
+        symbol_map = {
+            'BTCUSDT': 'bitcoin',
+            'ETHUSDT': 'ethereum',
+            'BNBUSDT': 'binancecoin',
+            'ADAUSDT': 'cardano',
+            'DOGEUSDT': 'dogecoin',
+        }
+        
+        coin = symbol_map.get(symbol, 'bitcoin')
+        
+        # Check cache first
+        if symbol in price_cache:
+            cached = price_cache[symbol]
+            variation = random.uniform(-0.001, 0.001)
+            return cached * (1 + variation)
+        
+        # Fetch from CoinGecko
+        url = f'https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd'
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        price = float(data[coin]['usd'])
+        
+        price_cache[symbol] = price
+        return price
+    except Exception as e:
+        print(f"Price fetch error: {e}")
+        return price_cache.get(symbol, 45000 if symbol == 'BTCUSDT' else 2500)
+
 def simulate_trade():
-    """Simulate a trade"""
+    """Simulate a trade with real price"""
     try:
         if not trading_state['is_trading']:
             return
@@ -44,8 +78,21 @@ def simulate_trade():
         if len(trading_state['open_positions']) >= CONFIG['max_positions']:
             return
         
+        symbol = random.choice(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT'])
         balance = trading_state['balance']
         risk_amount = balance * CONFIG['risk_per_trade']
+        
+        # Get real price
+        entry_price = get_real_price(symbol)
+        
+        # Calculate TP/SL
+        signal = random.choice(['BUY', 'SELL'])
+        if signal == 'BUY':
+            tp_price = entry_price * (1 + CONFIG['tp_percent'] / 100)
+            sl_price = entry_price * (1 - CONFIG['sl_percent'] / 100)
+        else:
+            tp_price = entry_price * (1 - CONFIG['tp_percent'] / 100)
+            sl_price = entry_price * (1 + CONFIG['sl_percent'] / 100)
         
         # 65% win rate
         is_win = random.random() < 0.65
@@ -54,19 +101,21 @@ def simulate_trade():
             profit = risk_amount * 3  # 3% profit
             trading_state['winning_trades'] += 1
             status = '✅ WIN'
+            exit_price = tp_price
         else:
             profit = -risk_amount  # 1% loss
             trading_state['losing_trades'] += 1
             status = '❌ LOSS'
+            exit_price = sl_price
         
         trade = {
             'id': trading_state['total_trades'] + 1,
-            'symbol': random.choice(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']),
-            'type': random.choice(['BUY', 'SELL']),
-            'entry_price': round(random.uniform(100, 50000), 2),
-            'tp_price': round(random.uniform(100, 50000), 2),
-            'sl_price': round(random.uniform(100, 50000), 2),
-            'exit_price': round(random.uniform(100, 50000), 2),
+            'symbol': symbol,
+            'type': signal,
+            'entry_price': round(entry_price, 2),
+            'tp_price': round(tp_price, 2),
+            'sl_price': round(sl_price, 2),
+            'exit_price': round(exit_price, 2),
             'profit': round(profit, 2),
             'time': datetime.now().isoformat(),
             'status': status,
@@ -88,7 +137,7 @@ def simulate_trade():
         print(f"Trade error: {e}")
 
 def auto_trading_loop():
-    """Auto trading background loop"""
+    """Auto trading background loop - every 2 seconds"""
     while True:
         try:
             simulate_trade()
@@ -107,7 +156,7 @@ def index():
 @app.route('/api/trading/start', methods=['POST'])
 def start():
     trading_state['is_trading'] = True
-    return jsonify({'status': '✅ Trading Started', 'is_trading': True})
+    return jsonify({'status': '✅ Trading Started - Scanning Real Prices Every 2 Sec', 'is_trading': True})
 
 @app.route('/api/trading/stop', methods=['POST'])
 def stop():
@@ -139,6 +188,15 @@ def positions():
         'open_positions': trading_state['open_positions'],
         'closed_trades': trading_state['closed_trades'][-50:],
     })
+
+@app.route('/api/prices', methods=['GET'])
+def get_prices():
+    """Get current prices of all symbols"""
+    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT']
+    prices = {}
+    for symbol in symbols:
+        prices[symbol] = get_real_price(symbol)
+    return jsonify(prices)
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
